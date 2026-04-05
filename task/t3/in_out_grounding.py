@@ -84,11 +84,15 @@ llm_client = AzureChatOpenAI(
 
 
 class GroupingResult(BaseModel):
+    """One hobby label and the user IDs the model associates with that hobby."""
+
     hobby: str = Field(description="Hobby. Example: football, painting, horsing, photography, bird watching...")
     user_ids: list[int] = Field(description="List of user IDs that have hobby requested by user.")
 
 
 class GroupingResults(BaseModel):
+    """Structured LLM output: all hobby groupings for a single user query."""
+
     grouping_results: list[GroupingResult] = Field(description="List matching search results.")
 
 
@@ -178,8 +182,10 @@ class InputGrounder:
             print(f"Adding {len(new_documents)} new users to vectorstore...")
             await self.vectorstore.aadd_documents(new_documents)
 
+
     def augment_prompt(self, query: str, context: str) -> str:
         return USER_PROMPT.format(context=context, query=query)
+
 
     def generate_answer(self, augmented_prompt: str) -> GroupingResults:
         parser = PydanticOutputParser(pydantic_object=GroupingResults)
