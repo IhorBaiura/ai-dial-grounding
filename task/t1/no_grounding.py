@@ -1,13 +1,10 @@
 import asyncio
 from typing import Any
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, HumanMessage
 from langchain_openai import AzureChatOpenAI
 from pydantic import SecretStr
 from task._constants import DIAL_URL, API_KEY
 from task.user_client import UserClient
-
-#TODO:
-# Before implementation open the `flow_diagram.png` to see the flow of app
 
 BATCH_SYSTEM_PROMPT = """You are a user search assistant. Your task is to find users from the provided list that match the search criteria.
 
@@ -37,50 +34,57 @@ USER_PROMPT = """## USER DATA:
 ## SEARCH QUERY: 
 {query}"""
 
+BATCH_SIZE = 100
 
 class TokenTracker:
     def __init__(self):
         self.total_tokens = 0
-        self.batch_tokens = []
+        self.batch_tokens: list[int] = []
 
-    def add_tokens(self, tokens: int):
+    def add_tokens(self, tokens: int) -> None:
         self.total_tokens += tokens
         self.batch_tokens.append(tokens)
 
-    def get_summary(self):
+    def get_summary(self) -> dict[str, int | list[int]]:
         return {
             'total_tokens': self.total_tokens,
             'batch_count': len(self.batch_tokens),
             'batch_tokens': self.batch_tokens
         }
 
-#TODO:
-# 1. Create AzureChatOpenAI client
-#    hint: api_version set as empty string if you gen an error that indicated that api_version cannot be None
-# 2. Create TokenTracker
+
+token_tracker = TokenTracker()
+
+llm_client = AzureChatOpenAI(
+    temperature=0.0,
+    azure_deployment="gpt-4o",
+    azure_endpoint=DIAL_URL,
+    api_key=SecretStr(API_KEY),
+    api_version=""
+)
 
 def join_context(context: list[dict[str, Any]]) -> str:
-    #TODO:
-    # You cannot pass raw JSON with user data to LLM (" sign), collect it in just simple string or markdown.
-    # You need to collect it in such way:
-    # User:
-    #   name: John
-    #   surname: Doe
-    #   ...
-    raise NotImplementedError
+    return "\n".join([f"User:\n" + "\n".join([f"  {key}: {value}" for key, value in user.items()]) for user in context])
 
 
 async def generate_response(system_prompt: str, user_message: str) -> str:
     print("Processing...")
-    #TODO:
-    # 1. Create messages array with system prompt and user message
-    # 2. Generate response (use `ainvoke`, don't forget to `await` the response)
-    # 3. Get usage (hint, usage can be found in response metadata (its dict) and has name 'token_usage', that is also
-    #    dict and there you need to get 'total_tokens')
-    # 4. Add tokens to `token_tracker`
-    # 5. Print response content and `total_tokens`
-    # 5. return response content
-    raise NotImplementedError
+
+    messages: list[BaseMessage] = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_message)
+    ]
+
+    response: AIMessage = await llm_client.ainvoke(messages)
+    token_usage = response.response_metadata.get('token_usage', {})
+    total_tokens = token_usage.get('total_tokens', 0)
+
+    token_tracker.add_tokens(total_tokens)
+    
+    print(f"Response Content: {response.content}")
+    print(f"Total Tokens Used: {total_tokens}")
+    
+    return response.content
 
 
 async def main():
@@ -91,29 +95,37 @@ async def main():
     if user_question:
         print("\n--- Searching user database ---")
 
-        #TODO:
-        # 1. Get all users (use UserClient)
-        # 2. Split all users on batches (100 users in 1 batch). We need it since LLMs have its limited context window
-        # 3. Prepare tasks for async run of response generation for users batches:
-        #       - create array tasks
-        #       - iterate through `user_batches` and call `generate_response` with these params:
-        #           - BATCH_SYSTEM_PROMPT (system prompt)
-        #           - User prompt, you need to format USER_PROMPT with context from user batch and user question
-        # 4. Run task asynchronously, use method `gather` form `asyncio`
-        # 5. Filter results on 'NO_MATCHES_FOUND' (see instructions for BATCH_SYSTEM_PROMPT)
-        # 5. If results after filtration are present:
-        #       - combine filtered results with "\n\n" spliterator
-        #       - generate response with such params:
-        #           - FINAL_SYSTEM_PROMPT (system prompt)
-        #           - User prompt: you need to make augmentation of retrieved result and user question
-        # 6. Otherwise prin the info that `No users found matching`
-        # 7. In the end print info about usage, you will be impressed of how many tokens you have used. (imagine if we have 10k or 100k users 😅)
-    raise NotImplementedError
+        user_client = UserClient()
+        users = user_client.get_all_users()
+        user_batches = [users[i:i + BATCH_SIZE] for i in range(0, len(users), BATCH_SIZE)]
+        user_batches = [join_context(batch) for batch in user_batches]
+        user_batches = [
+            generate_response(
+                BATCH_SYSTEM_PROMPT, 
+                USER_PROMPT.format(context=context, query=user_question)
+            ) for context in user_batches 
+        ]
+
+        responses = await asyncio.gather(*user_batches)
+        filtered_responses = [resp for resp in responses if resp.strip() != "NO_MATCHES_FOUND"]
+
+        if not filtered_responses:
+            print("No users found matching")
+        else:
+            combined_results = "\n\n".join(filtered_responses)
+            final_response = await generate_response(FINAL_SYSTEM_PROMPT, USER_PROMPT.format(context=combined_results, query=user_question))
+            print("\n--- Final Response ---")
+            print(final_response)
+
+    token_tracker_summary = token_tracker.get_summary()
+    print("\n--- Token Usage Summary ---")
+    print(f"Total Tokens Used: {token_tracker_summary['total_tokens']}")
+    print(f"Number of Batches Processed: {token_tracker_summary['batch_count']}")
+    print(f"Tokens Used per Batch: {token_tracker_summary['batch_tokens']}")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 # The problems with No Grounding approach are:
 #   - If we load whole users as context in one request to LLM we will hit context window
